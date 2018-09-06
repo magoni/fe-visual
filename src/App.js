@@ -1,28 +1,36 @@
 import {
   Scene,
-  PointLight,
-  PerspectiveCamera,
+  DirectionalLight,
   Vector3,
   ParametricGeometry,
-  MeshPhongMaterial,
+  MeshNormalMaterial,
   Mesh,
   WebGLRenderer,
-  MultiplyOperation,
-  DoubleSide
+  PerspectiveCamera,
+  Fog,
+  AmbientLight,
+  MeshPhongMaterial,
+  ShaderChunk,
+  PlaneBufferGeometry
 } from 'three';
+import OrbitControls from 'orbit-controls-es6';
+import * as dat from 'dat.gui';
 
 class App {
-  init() {
+  initAudio() {
     const context = new (window.AudioContext || window.webkitAudioContext)();
     const audio = new Audio();
+    const analyser = context.createAnalyser();
+    const filter = context.createBiquadFilter();
+    const bufferLength = analyser.frequencyBinCount;
+    const timeDomainData = new Uint8Array(bufferLength);
+    const normalisedLevel = 0;
+
     audio.src = '08.mp3';
     audio.autoplay = true;
     audio.loop = true;
     document.body.appendChild(audio);
 
-    const analyser = context.createAnalyser();
-
-    const filter = context.createBiquadFilter();
     filter.type = 'bandpass';
     filter.frequency.value = 4000;
     filter.Q.value = 2;
@@ -32,34 +40,68 @@ class App {
       // source -> bandpass filter -> analyser
       source.connect(filter);
       filter.connect(analyser);
-
       // source audio -> output
       source.connect(context.destination);
     }, false);
 
     analyser.smoothingTimeConstant = 1;
     analyser.fftSize = 256;
-    const bufferLength = analyser.frequencyBinCount;
-    const timeDomainData = new Uint8Array(bufferLength);
     analyser.getByteTimeDomainData(timeDomainData);
-    let normalisedLevel = 0;
+    return { normalisedLevel, analyser, timeDomainData };
+  }
 
-    // visual
-    const detail = 40;
+  init() {
+    let { normalisedLevel, analyser, timeDomainData } = this.initAudio();
+
+    // scene
+    const detail = 50;
     const scene = new Scene();
-
-    // light
-    const pointLight = new PointLight(0xFFFFFF);
-
-    pointLight.position.x = 0;
-    pointLight.position.y = 0;
-    pointLight.position.z = 10;
-
-    scene.add(pointLight);
+    scene.fog = new Fog(0xcce0ff, 5, 100);
 
     // camera
-    const camera = new PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 1000);
-    camera.position.set(0, 0, 4);
+    const camera = new PerspectiveCamera(30, window.innerWidth / window.innerHeight, 1, 10000);
+    camera.position.y = 5;
+    camera.position.z = 30;
+
+    scene.add(camera);
+
+    // light
+    scene.add(new AmbientLight(0x666666));
+
+    const light = new DirectionalLight(0xdfebff, 1.75);
+    light.position.set(2, 8, 4);
+
+    light.castShadow = true;
+    light.shadow.mapSize.width = 1024;
+    light.shadow.mapSize.height = 1024;
+    light.shadow.camera.far = 20;
+
+    scene.add(light);
+    // scene.add(new CameraHelper(light.shadow.camera));
+
+    // ground
+    const groundMaterial = new MeshPhongMaterial({ color: 0x404040, specular: 0x111111 });
+    const groundMesh = new Mesh(new PlaneBufferGeometry(20000, 20000), groundMaterial);
+    groundMesh.rotation.x = - Math.PI / 2;
+    groundMesh.receiveShadow = true;
+    scene.add(groundMesh);
+
+    // overwrite shadowmap code https://threejs.org/examples/webgl_shadowmap_pcss.html
+    let shader = ShaderChunk.shadowmap_pars_fragment;
+
+    shader = shader.replace(
+      '#ifdef USE_SHADOWMAP',
+      '#ifdef USE_SHADOWMAP' +
+      document.getElementById('PCSS').textContent
+    );
+
+    shader = shader.replace(
+      '#if defined( SHADOWMAP_TYPE_PCF )',
+      document.getElementById('PCSSGetShadow').textContent +
+      '#if defined( SHADOWMAP_TYPE_PCF )'
+    );
+
+    ShaderChunk.shadowmap_pars_fragment = shader;
 
     const time = 1;
     let peakInstantaneousPowerDecibels = 0;
@@ -121,32 +163,35 @@ class App {
       return result.set(x, y, z);
     }
 
+
     // meshes
     const geometry = new ParametricGeometry(parafunc, detail, detail);
     geometry.dynamic = false;
-    // const material = new MeshNormalMaterial( { overdraw: 0.5 } );
-    const material = new MeshPhongMaterial({
-      color: 0xb1d2ef,
-      specular: 0xffc0cb,
-      combine: MultiplyOperation,
-      side: DoubleSide,
-      shininess: 50,
-      reflectivity: 1.0
-    });
-    material.transparent = true;
-    material.opacity = 0.7;
 
-    // material.emissive = new Color( 0xffc0cb );
+    const material = new MeshNormalMaterial();
+    // TODO why is making material transparent or lights throwing error
 
     const mesh = new Mesh(geometry, material);
+    mesh.castShadow = true;
     scene.add(mesh);
 
     // renderer
     const renderer = new WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setClearColor(0x000000);
+    renderer.setClearColor(scene.fog.color);
     renderer.setPixelRatio(window.devicePixelRatio);
     document.body.appendChild(renderer.domElement);
+
+    renderer.gammaInput = true;
+    renderer.gammaOutput = true;
+
+    renderer.shadowMap.enabled = true;
+
+    // controls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enabled = true;
+    controls.maxDistance = 1500;
+    controls.minDistance = 0;
 
     function onResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
@@ -170,19 +215,26 @@ class App {
 
       peakInstantaneousPowerDecibels = 10 * Math.log10(peakInstantaneousPower);
       normalisedLevel = (peakInstantaneousPowerDecibels - 42.0) * 2;
-      // todo smooth levels?
+      // TODO smooth levels?
     }
 
+    const params = { meshX: 0, meshY: 3, meshZ: 0, meshSize: 2 };
+
+    const gui = new dat.GUI();
+
+    gui.add(params, 'meshX', -100, 100);
+    gui.add(params, 'meshY', -10, 10);
+    gui.add(params, 'meshZ', -10, 10);
+    gui.add(params, 'meshSize', 0, 2);
+
     function render() {
-      // if (Math.floor(time) % 10 === 0) {
-      // if (normalisedLevel > -35 || Math.floor(time) % 100 === 0) {
       if (normalisedLevel > -34.6) {
         shape = Math.floor(Math.random() * numShapes);
-        mesh.scale.x = mesh.scale.y = mesh.scale.z = Math.random() + 0.3;
       }
 
-      // mesh.rotation.x+=.01;
-      mesh.rotation.y += .005;
+      mesh.rotation.y += .003;
+      mesh.position.set(params.meshX, params.meshY, params.meshZ);
+      mesh.scale.x = mesh.scale.y = mesh.scale.z = params.meshSize;
 
       updateGeometry();
       updateAudioLevel();

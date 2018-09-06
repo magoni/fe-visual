@@ -1,22 +1,119 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <meta name="theme-color" content="#000000">
-    <!--
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <meta name="theme-color" content="#000000">
+  <!--
       manifest.json provides metadata used when your web app is added to the
       homescreen on Android. See https://developers.google.com/web/fundamentals/engage-and-retain/web-app-manifest/
     -->
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json">
-    <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico">
-    <title>Fragmented Environments</title>
-  </head>
-  <body>
-    <noscript>
-      You need to enable JavaScript to run this site.
-      <a href="http://www.enable-javascript.com/" target="_blank" class="sc-button sc-button-medium">Show me how to enable it</a>
-    </noscript>
-    <div id="root"></div>
-  </body>
+  <link rel="manifest" href="%PUBLIC_URL%/manifest.json">
+  <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico">
+  <title>gonima — Fragmented Environments</title>
+</head>
+
+<body>
+  <noscript>
+    You need to enable JavaScript to run this site.
+    <br>
+    <a href="http://www.enable-javascript.com/" target="_blank">Show me how to enable it</a>
+  </noscript>
+  <div id="root"></div>
+  <script type="x-shader/x-fragment" id="PCSS">
+      // https://threejs.org/examples/webgl_shadowmap_pcss.html
+
+      #define LIGHT_WORLD_SIZE 0.005
+      #define LIGHT_FRUSTUM_WIDTH 3.75
+      #define LIGHT_SIZE_UV (LIGHT_WORLD_SIZE / LIGHT_FRUSTUM_WIDTH)
+      #define NEAR_PLANE 9.5
+
+      #define NUM_SAMPLES 17
+      #define NUM_RINGS 11
+      #define BLOCKER_SEARCH_NUM_SAMPLES NUM_SAMPLES
+      #define PCF_NUM_SAMPLES NUM_SAMPLES
+
+      vec2 poissonDisk[NUM_SAMPLES];
+
+      void initPoissonSamples( const in vec2 randomSeed ) {
+        float ANGLE_STEP = PI2 * float( NUM_RINGS ) / float( NUM_SAMPLES );
+        float INV_NUM_SAMPLES = 1.0 / float( NUM_SAMPLES );
+
+        // jsfiddle that shows sample pattern: https://jsfiddle.net/a16ff1p7/
+        float angle = rand( randomSeed ) * PI2;
+        float radius = INV_NUM_SAMPLES;
+        float radiusStep = radius;
+
+        for( int i = 0; i < NUM_SAMPLES; i ++ ) {
+          poissonDisk[i] = vec2( cos( angle ), sin( angle ) ) * pow( radius, 0.75 );
+          radius += radiusStep;
+          angle += ANGLE_STEP;
+        }
+      }
+
+      float penumbraSize( const in float zReceiver, const in float zBlocker ) { // Parallel plane estimation
+        return (zReceiver - zBlocker) / zBlocker;
+      }
+
+      float findBlocker( sampler2D shadowMap, const in vec2 uv, const in float zReceiver ) {
+        // This uses similar triangles to compute what
+        // area of the shadow map we should search
+        float searchRadius = LIGHT_SIZE_UV * ( zReceiver - NEAR_PLANE ) / zReceiver;
+        float blockerDepthSum = 0.0;
+        int numBlockers = 0;
+
+        for( int i = 0; i < BLOCKER_SEARCH_NUM_SAMPLES; i++ ) {
+          float shadowMapDepth = unpackRGBAToDepth(texture2D(shadowMap, uv + poissonDisk[i] * searchRadius));
+          if ( shadowMapDepth < zReceiver ) {
+            blockerDepthSum += shadowMapDepth;
+            numBlockers ++;
+          }
+        }
+
+        if( numBlockers == 0 ) return -1.0;
+
+        return blockerDepthSum / float( numBlockers );
+      }
+
+      float PCF_Filter(sampler2D shadowMap, vec2 uv, float zReceiver, float filterRadius ) {
+        float sum = 0.0;
+        for( int i = 0; i < PCF_NUM_SAMPLES; i ++ ) {
+          float depth = unpackRGBAToDepth( texture2D( shadowMap, uv + poissonDisk[ i ] * filterRadius ) );
+          if( zReceiver <= depth ) sum += 1.0;
+        }
+        for( int i = 0; i < PCF_NUM_SAMPLES; i ++ ) {
+          float depth = unpackRGBAToDepth( texture2D( shadowMap, uv + -poissonDisk[ i ].yx * filterRadius ) );
+          if( zReceiver <= depth ) sum += 1.0;
+        }
+        return sum / ( 2.0 * float( PCF_NUM_SAMPLES ) );
+      }
+
+      float PCSS ( sampler2D shadowMap, vec4 coords ) {
+        vec2 uv = coords.xy;
+        float zReceiver = coords.z; // Assumed to be eye-space z in this code
+
+        initPoissonSamples( uv );
+        // STEP 1: blocker search
+        float avgBlockerDepth = findBlocker( shadowMap, uv, zReceiver );
+
+        //There are no occluders so early out (this saves filtering)
+        if( avgBlockerDepth == -1.0 ) return 1.0;
+
+        // STEP 2: penumbra size
+        float penumbraRatio = penumbraSize( zReceiver, avgBlockerDepth );
+        float filterRadius = penumbraRatio * LIGHT_SIZE_UV * NEAR_PLANE / zReceiver;
+
+        // STEP 3: filtering
+        //return avgBlockerDepth;
+        return PCF_Filter( shadowMap, uv, zReceiver, filterRadius );
+      }
+
+  </script>
+
+  <script type="x-shader/x-fragment" id="PCSSGetShadow">
+    return PCSS( shadowMap, shadowCoord );
+  </script>
+</body>
+
 </html>
