@@ -9,10 +9,14 @@ import {
   PerspectiveCamera,
   Fog,
   AmbientLight,
-  MeshPhongMaterial,
-  ShaderChunk,
-  PlaneBufferGeometry
+  PlaneBufferGeometry,
+  TextureLoader,
+  RepeatWrapping,
+  CubeCamera,
+  LinearMipMapLinearFilter
 } from 'three';
+import Water from './Water';
+import Sky from './Sky';
 import OrbitControls from 'orbit-controls-es6';
 import * as dat from 'dat.gui';
 
@@ -53,10 +57,15 @@ class App {
   init() {
     let { normalisedLevel, analyser, timeDomainData } = this.initAudio();
 
+    // renderer
+    let renderer = new WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
     // scene
     const detail = 50;
     const scene = new Scene();
-    scene.fog = new Fog(0xcce0ff, 5, 100);
 
     // camera
     const camera = new PerspectiveCamera(30, window.innerWidth / window.innerHeight, 1, 10000);
@@ -68,41 +77,68 @@ class App {
     // light
     scene.add(new AmbientLight(0x666666));
 
-    const light = new DirectionalLight(0xdfebff, 1.75);
-    light.position.set(2, 8, 4);
-
-    light.castShadow = true;
-    light.shadow.mapSize.width = 1024;
-    light.shadow.mapSize.height = 1024;
-    light.shadow.camera.far = 20;
-
+    const light = new DirectionalLight(0xffffff, 0.8);
     scene.add(light);
     // scene.add(new CameraHelper(light.shadow.camera));
 
-    // ground
-    const groundMaterial = new MeshPhongMaterial({ color: 0x404040, specular: 0x111111 });
-    const groundMesh = new Mesh(new PlaneBufferGeometry(20000, 20000), groundMaterial);
-    groundMesh.rotation.x = - Math.PI / 2;
-    groundMesh.receiveShadow = true;
-    scene.add(groundMesh);
+    const waterNormals = new TextureLoader().load('textures/waternormals.jpg');
+    waterNormals.wrapS = waterNormals.wrapT = RepeatWrapping;
 
-    // overwrite shadowmap code https://threejs.org/examples/webgl_shadowmap_pcss.html
-    let shader = ShaderChunk.shadowmap_pars_fragment;
-
-    shader = shader.replace(
-      '#ifdef USE_SHADOWMAP',
-      '#ifdef USE_SHADOWMAP' +
-      document.getElementById('PCSS').textContent
+    const waterGeometry = new PlaneBufferGeometry(10000, 10000);
+    const water = new Water(
+      waterGeometry,
+      {
+        textureWidth: 512,
+        textureHeight: 512,
+        waterNormals: new TextureLoader().load('textures/waternormals.jpg', function (texture) {
+          texture.wrapS = texture.wrapT = RepeatWrapping;
+        }),
+        alpha: 1,
+        sunDirection: light.position.clone().normalize(),
+        sunColor: 0xffffff,
+        waterColor: 0x001e0f,
+        distortionScale: 3.7,
+        fog: scene.fog !== undefined
+      }
     );
+    water.rotation.x = - Math.PI / 2;
+    scene.add(water);
 
-    shader = shader.replace(
-      '#if defined( SHADOWMAP_TYPE_PCF )',
-      document.getElementById('PCSSGetShadow').textContent +
-      '#if defined( SHADOWMAP_TYPE_PCF )'
-    );
+    // Skybox
+    let sky = new Sky();
+    sky.scale.setScalar(10000);
+    scene.add(sky);
 
-    ShaderChunk.shadowmap_pars_fragment = shader;
+    let uniforms = sky.material.uniforms;
+    uniforms.turbidity.value = 10;
+    uniforms.rayleigh.value = 2;
+    uniforms.luminance.value = 1;
+    uniforms.mieCoefficient.value = 0.005;
+    uniforms.mieDirectionalG.value = 0.8;
 
+    let parameters = {
+      distance: 400,
+      inclination: 0.3,
+      azimuth: 0.205
+    };
+
+    let cubeCamera = new CubeCamera(1, 20000, 256);
+    cubeCamera.renderTarget.texture.minFilter = LinearMipMapLinearFilter;
+
+    function updateSun() {
+      let theta = Math.PI * (parameters.inclination - 0.5);
+      let phi = 2 * Math.PI * (parameters.azimuth - 0.5);
+      light.position.x = parameters.distance * Math.cos(phi);
+      light.position.y = parameters.distance * Math.sin(phi) * Math.sin(theta);
+      light.position.z = parameters.distance * Math.sin(phi) * Math.cos(theta);
+      sky.material.uniforms.sunPosition.value = light.position.copy(light.position);
+      water.material.uniforms.sunDirection.value.copy(light.position).normalize();
+      cubeCamera.update(renderer, scene);
+    }
+
+    updateSun();
+
+    // shape
     const time = 1;
     let peakInstantaneousPowerDecibels = 0;
 
@@ -175,23 +211,13 @@ class App {
     mesh.castShadow = true;
     scene.add(mesh);
 
-    // renderer
-    const renderer = new WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setClearColor(scene.fog.color);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    document.body.appendChild(renderer.domElement);
-
-    renderer.gammaInput = true;
-    renderer.gammaOutput = true;
-
-    renderer.shadowMap.enabled = true;
-
     // controls
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enabled = true;
     controls.maxDistance = 1500;
     controls.minDistance = 0;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 1;
 
     function onResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
@@ -218,26 +244,42 @@ class App {
       // TODO smooth levels?
     }
 
-    const params = { meshX: 0, meshY: 3, meshZ: 0, meshSize: 2 };
+    const params = { meshX: 0, meshY: 4, meshZ: 0, meshSize: 3 };
 
     const gui = new dat.GUI();
 
-    gui.add(params, 'meshX', -100, 100);
-    gui.add(params, 'meshY', -10, 10);
-    gui.add(params, 'meshZ', -10, 10);
-    gui.add(params, 'meshSize', 0, 2);
+    let folder = gui.addFolder('Shape');
+    folder.add(params, 'meshX', -100, 100);
+    folder.add(params, 'meshY', -10, 10);
+    folder.add(params, 'meshZ', -10, 10);
+    folder.add(params, 'meshSize', 0, 10);
+
+    folder = gui.addFolder('Sky');
+    folder.add(parameters, 'inclination', 0, 0.5, 0.0001).onChange(updateSun);
+    folder.add(parameters, 'azimuth', 0, 1, 0.0001).onChange(updateSun);
+
+    uniforms = water.material.uniforms;
+    folder = gui.addFolder('Water');
+    folder.add(uniforms.distortionScale, 'value', 0, 8, 0.1).name('distortionScale');
+    folder.add(uniforms.size, 'value', 0.1, 10, 0.1).name('size');
+    folder.add(uniforms.alpha, 'value', 0.0, 1, .001).name('alpha');
+    folder.open();
 
     function render() {
       if (normalisedLevel > -34.6) {
         shape = Math.floor(Math.random() * numShapes);
       }
 
-      mesh.rotation.y += .003;
+      // mesh.rotation.y += .003;
       mesh.position.set(params.meshX, params.meshY, params.meshZ);
       mesh.scale.x = mesh.scale.y = mesh.scale.z = params.meshSize;
 
       updateGeometry();
       updateAudioLevel();
+
+      controls.update(); // required as long as autoRotate is on
+
+      water.material.uniforms.time.value += 1.0 / 60.0;
 
       renderer.render(scene, camera);
     }
